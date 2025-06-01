@@ -1,0 +1,33 @@
+# ------------------------------------------------------------
+# Differentiable Tree Search Network – Training Configuration
+# ------------------------------------------------------------
+
+# ---------- Data ----------
+dataset_path: data/dataset.pkl   # path the trainer will load
+
+# ---------- Model / Search ----------
+latent_dim: 64          # size of latent state h_t
+action_dim: 4           # 4-way grid-world; set 15 for Procgen
+max_iters: 10           # tree-expansion steps per forward pass
+temperature: 1.0        # softmax τ for node selection
+
+# ---------- Optimisation ----------
+learning_rate: 3e-4
+batch_size: 32
+epochs: 50
+device: cuda            # "cpu" or "cuda"
+
+# ---------- Loss Weights ----------
+lambda_q:          1.0   # supervised Q regression
+lambda_d:          0.1   # CQL penalty
+lambda_t:          1.0   # transition consistency
+lambda_r:          1.0   # reward consistency
+lambda_reinforce:  0.0   # set >0 (e.g. 0.01) to enable REINFORCE term
+
+# ---------- EMA Target Encoder ----------
+ema_tau: 0.005          # exponential moving-average rate
+
+# ---------- Misc ----------
+grad_clip: 1.0           # global-norm gradient clipping
+seed: 42
+log_interval: 100        # train.py can use this for reporting (optional)

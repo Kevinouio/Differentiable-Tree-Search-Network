@@ -23,6 +23,8 @@ from dtsn.losses import (
     reward_consistency_loss,
     reinforce_term,
 )
+from dtsn.logger import TBLogger   
+
 
 # ----------------------------------------------------------------------------
 # helpers
@@ -46,6 +48,12 @@ def _load_dataset(pkl_path: str | Path) -> TensorDataset:
 
 def train(cfg_path: str | Path = "configs/config.yaml"):
     cfg = _load_config(cfg_path)
+    cfg.learning_rate = float(cfg.learning_rate)
+    print(f"Using config: {cfg}")
+    cfg.batch_size    = int(cfg.batch_size)
+    cfg.max_iters     = int(cfg.max_iters)
+    # (cast any other numeric field you might accidentally quote)
+
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
 
     dataset = _load_dataset("data/dataset.pkl")
@@ -73,6 +81,9 @@ def train(cfg_path: str | Path = "configs/config.yaml"):
     params = list(encoder.parameters()) + list(transition.parameters()) + \
              list(reward_net.parameters()) + list(value_net.parameters())
     optim = torch.optim.Adam(params, lr=cfg.learning_rate)
+    logger = TBLogger(run_name=f"gridworld_bs{cfg.batch_size}_lr{cfg.learning_rate}")
+    global_step = 0
+
 
     # ------------------------------------------------------------------
     for epoch in range(cfg.epochs):
@@ -85,7 +96,15 @@ def train(cfg_path: str | Path = "configs/config.yaml"):
             q_target = q_target.to(device)
 
             # ==== forward search (batched) ====
-            q_vecs, log_probs = search.search(obs)
+            # ==== forward search (batched, but looped) ====
+            q_vecs_list, log_probs_list = [], []
+            for obs_i in obs:                       # iterate over batch dim
+                q_vec_i, log_probs_i = search._search_single(obs_i)
+                q_vecs_list.append(q_vec_i)
+                log_probs_list.append(log_probs_i)
+            q_vecs  = torch.stack(q_vecs_list)       # (B, A)
+            log_probs = torch.stack(log_probs_list)  # (B, T)
+
             # q_vecs: (B, A); log_probs: (B, T)
 
             # ==== losses ====
@@ -120,6 +139,12 @@ def train(cfg_path: str | Path = "configs/config.yaml"):
             torch.nn.utils.clip_grad_norm_(params, 1.0)
             optim.step()
 
+            # ==== logging ====
+
+            logger.log(global_step, total_loss=total, q_loss=loss_q, cql=loss_cql, trans_cons=loss_t, rew_cons=loss_r,)
+            global_step += 1
+            
+
             # EMA update
             with torch.no_grad():
                 for pt, p in zip(enc_t.parameters(), encoder.parameters()):
@@ -135,6 +160,8 @@ def train(cfg_path: str | Path = "configs/config.yaml"):
             "reward": reward_net.state_dict(),
             "value": value_net.state_dict(),
         }, ckpt_dir / f"dtsn_epoch{epoch+1}.pt")
+    logger.close()
+
 
 
 if __name__ == "__main__":

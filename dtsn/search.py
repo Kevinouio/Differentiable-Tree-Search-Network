@@ -47,7 +47,7 @@ class DTSNSearch:
         log_probs : torch.Tensor (B, max_iters)
         """
         # vmap over the 0-dim using a closure around *self*
-        q_vecs, logps = torch.vmap(self._search_single, in_dims=0, out_dims=0)(obs_batch)
+        q_vecs, logps = torch.vmap(self._search_single,in_dims=0,out_dims=0,randomness="different")(obs_batch)
         # stack log_probs list → (B, T)
         log_probs = torch.stack(logps, dim=0)
         return q_vecs, log_probs
@@ -62,22 +62,29 @@ class DTSNSearch:
         root = TreeNode(h_root)
         open_set = [root]
         log_probs: List[torch.Tensor] = []
+        assert self.max_iters > 0, "max_iters is zero"
+
 
         # ---------------- Expansion ----------------
         for _ in range(self.max_iters):
+            # --- before sampling ---------------------------------
             path_vals = torch.stack([
-                node.reward.detach() + self.value(node.latent)  # detach reward for variance stability
+                node.reward.detach() + self.value(node.latent)     # (1,) tensor
                 for node in open_set
-            ])
-            probs = F.softmax(path_vals / self.temperature, dim=0)
-            m = torch.distributions.Categorical(probs)
-            idx = m.sample()
-            log_probs.append(m.log_prob(idx))
-            node = open_set.pop(idx.item())
+            ]).squeeze(-1)      # <- NEW: remove the extra dim so shape == (num_open,)
+
+            probs = torch.softmax(path_vals / self.temperature, dim=0)
+            m     = torch.distributions.Categorical(probs)
+            idx_t = m.sample()
+            log_probs.append(m.log_prob(idx_t))      # <- NEW
+            idx   = int(idx_t)                       # python int
+
+            node  = open_set.pop(idx)
+
 
             # expand all actions
             for a in range(self.action_dim):
-                a_t = torch.tensor([a], device=device)
+                a_t = torch.tensor(a, device=device)
                 h_next = self.transition(node.latent, a_t)
                 r_next = self.reward(node.latent, a_t)
                 child = TreeNode(
