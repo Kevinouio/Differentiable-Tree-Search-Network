@@ -20,9 +20,13 @@ build/
 # -----------------------------------------------------------------------------
 # Data & outputs
 # -----------------------------------------------------------------------------
-# Offline datasets
-data/
-!data/README.md           # keep a placeholder/readme if you like
+
+# Ignore everything in data/
+data/*
+
+# But don't ignore these:
+!data/README.md
+!data/make_dataset.py
 
 # Model checkpoints
 checkpoints/

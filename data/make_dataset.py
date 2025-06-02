@@ -179,7 +179,7 @@ if __name__ == "__main__":
     parser.add_argument("--exits", type=int, choices=[1, 2], default=2)
     parser.add_argument("--epsilon", type=float, default=0.0,
                         help="ε-greedy noise in behaviour policy")
-    parser.add_argument("--out", type=str, default="data/dataset.pkl")
+    parser.add_argument("--out", type=str, default="dataset.pkl")
     args = parser.parse_args()
 
     generate_dataset(args.episodes, args.exits, args.epsilon, Path(args.out))
