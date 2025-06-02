@@ -30,21 +30,30 @@ def load_agent(ckpt_path: Path, latent_dim: int, action_dim: int, device):
 
 
 @torch.no_grad()
+@torch.no_grad()
 def evaluate(agent: DTSNSearch, env: GridWorld, episodes: int, device):
+    """Return success-rate and collision-rate over N episodes."""
     success, collisions = 0, 0
+
     for _ in range(episodes):
-        obs = torch.tensor(env.reset(), device=device)
+        obs_np = env.reset()                                    # fresh episode
+        obs    = torch.tensor(obs_np, dtype=torch.float32, device=device)
+
         done = False
         while not done:
             q_vec, _ = agent._search_single(obs)
             act = int(torch.argmax(q_vec).item())
+
             obs_np, _, done, info = env.step(act)
-            obs = torch.tensor(obs_np, device=device)
+            obs = torch.tensor(obs_np, dtype=torch.float32, device=device)
+
             if info.get("collided", False):
                 collisions += 1
-                break
+                break  # terminate early on collision
+
         if np.all(env.state == env.goal):
             success += 1
+
     return success / episodes, collisions / episodes
 
 
