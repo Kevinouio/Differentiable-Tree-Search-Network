@@ -30,7 +30,6 @@ def load_agent(ckpt_path: Path, latent_dim: int, action_dim: int, device):
 
 
 @torch.no_grad()
-@torch.no_grad()
 def evaluate(agent: DTSNSearch, env: GridWorld, episodes: int, device):
     """Return success-rate and collision-rate over N episodes."""
     success, collisions = 0, 0
