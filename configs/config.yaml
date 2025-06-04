@@ -19,10 +19,10 @@ device: cuda            # "cpu" or "cuda"
 
 # ---------- Loss Weights ----------
 lambda_q:          1.0   # supervised Q regression
-lambda_d:          0.1   # CQL penalty
-lambda_t:          1.0   # transition consistency
-lambda_r:          1.0   # reward consistency
-lambda_reinforce:  0.0   # set >0 (e.g. 0.01) to enable REINFORCE term
+lambda_d: 1.0
+lambda_t: 2.0
+lambda_r: 2.0
+lambda_reinforce: 0.01
 
 # ---------- EMA Target Encoder ----------
 ema_tau: 0.005          # exponential moving-average rate

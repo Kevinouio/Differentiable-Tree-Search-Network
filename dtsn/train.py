@@ -95,7 +95,6 @@ def train(cfg_path: str | Path = "configs/config.yaml"):
             next_obs = next_obs.to(device)
             q_target = q_target.to(device)
 
-            # ==== forward search (batched) ====
             # ==== forward search (batched, but looped) ====
             q_vecs_list, log_probs_list = [], []
             for obs_i in obs:                       # iterate over batch dim
@@ -124,12 +123,18 @@ def train(cfg_path: str | Path = "configs/config.yaml"):
             # REINFORCE term (optional) – use negative supervised loss diff
             reinforce_loss = torch.tensor(0.0, device=device)
             if cfg.lambda_reinforce > 0:
-                # compute per-step BC loss (no grad) inside tree
-                step_losses = []
-                for t in range(cfg.max_iters):
-                    step_losses.append(loss_q.detach())  # placeholder: proper L_t requires hook inside search
-                rewards = [step_losses[0]] + [step_losses[i] - step_losses[i-1] for i in range(1, len(step_losses))]
-                reinforce_loss = reinforce_term(log_probs.flatten(), torch.tensor(rewards, device=device)) * cfg.lambda_reinforce
+                # log_probs: (B, T)  →  take the batch-mean so we have one per step
+                log_list = [log_probs[:, t].mean() for t in range(cfg.max_iters)]
+
+                # per-step supervised loss to create rewards (still placeholder)
+                step_losses = [loss_q.detach() for _ in range(cfg.max_iters)]
+                step_rewards = [step_losses[0]] + [
+                    step_losses[t] - step_losses[t - 1] for t in range(1, cfg.max_iters)
+                ]
+
+                reinforce_loss = (
+                    reinforce_term(log_list, step_rewards) * cfg.lambda_reinforce
+                )
 
             total = (cfg.lambda_q * loss_q + cfg.lambda_d * loss_cql +
                      cfg.lambda_t * loss_t + cfg.lambda_r * loss_r + reinforce_loss)

@@ -74,6 +74,7 @@ if __name__ == "__main__":
         action_dim=4,
         device=device,
     )
+    agent.max_iters = 20
 
     succ, coll = evaluate(agent, env, args.episodes, device)
     print(f"Success rate:   {succ*100:.1f} %")
