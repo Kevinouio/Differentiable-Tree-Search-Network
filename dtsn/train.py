@@ -1,9 +1,9 @@
 """dtsn.train
 ================
-Batch-parallel offline RL training loop for Differentiable Tree Search Network.
-Assumes dataset tensors are stored in `data/dataset.pkl`.
+Offline‑RL training loop for Differentiable Tree‑Search Network.
+Now uses the *hook* API in `search.search()` to compute the true
+REINFORCE term from Section 3.6 → 3.7 of the paper.
 """
-
 from __future__ import annotations
 
 import pickle
@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm.auto import tqdm
 
@@ -23,12 +24,11 @@ from dtsn.losses import (
     reward_consistency_loss,
     reinforce_term,
 )
-from dtsn.logger import TBLogger   
+from dtsn.logger import TBLogger
 
-
-# ----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # helpers
-# ----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 
 def _load_config(path: str | Path) -> SimpleNamespace:
     import yaml
@@ -42,36 +42,36 @@ def _load_dataset(pkl_path: str | Path) -> TensorDataset:
     return TensorDataset(d["obs"], d["action"], d["reward"], d["next_obs"], d["q"])
 
 
-# ----------------------------------------------------------------------------
-# main training entry
-# ----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# main
+# -----------------------------------------------------------------------------
 
 def train(cfg_path: str | Path = "configs/config.yaml"):
+    # ---------- config ----------
     cfg = _load_config(cfg_path)
     cfg.learning_rate = float(cfg.learning_rate)
-    print(f"Using config: {cfg}")
-    cfg.batch_size    = int(cfg.batch_size)
-    cfg.max_iters     = int(cfg.max_iters)
-    # (cast any other numeric field you might accidentally quote)
+    cfg.batch_size = int(cfg.batch_size)
+    cfg.max_iters = int(cfg.max_iters)
+    print("Using config:", cfg)
 
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
 
-    dataset = _load_dataset("data/dataset.pkl")
+    # ---------- data ----------
+    dataset = _load_dataset(cfg.dataset_path)
     loader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True, drop_last=True)
-
     obs_dim = dataset.tensors[0].shape[-1]
     action_dim = cfg.action_dim
 
-    # build nets
+    # ---------- networks ----------
     encoder = Encoder(obs_dim, cfg.latent_dim).to(device)
     transition = Transition(cfg.latent_dim, action_dim).to(device)
     reward_net = Reward(cfg.latent_dim, action_dim).to(device)
     value_net = Value(cfg.latent_dim).to(device)
 
-    # target encoder for consistency
+    # EMA target encoder (for consistency loss)
     enc_t = Encoder(obs_dim, cfg.latent_dim).to(device)
     enc_t.load_state_dict(encoder.state_dict())
-    ema_tau = 0.005
+    ema_tau = cfg.ema_tau
 
     search = DTSNSearch(
         encoder, transition, reward_net, value_net,
@@ -81,38 +81,34 @@ def train(cfg_path: str | Path = "configs/config.yaml"):
     params = list(encoder.parameters()) + list(transition.parameters()) + \
              list(reward_net.parameters()) + list(value_net.parameters())
     optim = torch.optim.Adam(params, lr=cfg.learning_rate)
-    logger = TBLogger(run_name=f"gridworld_bs{cfg.batch_size}_lr{cfg.learning_rate}")
+
+    # ---------- logging ----------
+    logger = TBLogger(run_name=f"grid_bs{cfg.batch_size}_lr{cfg.learning_rate}")
     global_step = 0
 
-
-    # ------------------------------------------------------------------
+    # ------------------------------------------------------------------ epochs
     for epoch in range(cfg.epochs):
         pbar = tqdm(loader, desc=f"epoch {epoch+1}/{cfg.epochs}")
         for obs, act, rew, next_obs, q_target in pbar:
-            obs = obs.to(device)
-            act = act.to(device)
-            rew = rew.to(device)
-            next_obs = next_obs.to(device)
-            q_target = q_target.to(device)
+            obs, act = obs.to(device), act.to(device)
+            rew, next_obs, q_target = rew.to(device), next_obs.to(device), q_target.to(device)
 
-            # ==== forward search (batched, but looped) ====
-            q_vecs_list, log_probs_list = [], []
-            for obs_i in obs:                       # iterate over batch dim
-                q_vec_i, log_probs_i = search._search_single(obs_i)
-                q_vecs_list.append(q_vec_i)
-                log_probs_list.append(log_probs_i)
-            q_vecs  = torch.stack(q_vecs_list)       # (B, A)
-            log_probs = torch.stack(log_probs_list)  # (B, T)
+            # ------------------------------------------------ search (with hook)
+            step_losses: list[list[torch.Tensor]] = [[] for _ in range(cfg.max_iters)]
 
-            # q_vecs: (B, A); log_probs: (B, T)
+            def hook(q_vec: torch.Tensor, b: int, t: int):
+                """Collect per‑step supervised loss for REINFORCE baseline."""
+                chosen = q_vec[act[b]]
+                step_losses[t].append(F.mse_loss(chosen, q_target[b], reduction='none'))
 
-            # ==== losses ====
-            # supervised Q for chosen actions
+            q_vecs, log_probs = search.search(obs, step_hook=hook)
+            # q_vecs (B,A)  log_probs (B,T)
+
+            # ------------------------------------------------ losses
             chosen_q = q_vecs.gather(1, act.unsqueeze(1)).squeeze(1)
             loss_q = q_loss(chosen_q, q_target)
             loss_cql = cql_loss(q_vecs, act)
 
-            # world-model consistency
             with torch.no_grad():
                 h_next_true = enc_t(next_obs)
             h_pred = transition(encoder(obs), act)
@@ -120,53 +116,46 @@ def train(cfg_path: str | Path = "configs/config.yaml"):
             r_pred = reward_net(encoder(obs), act)
             loss_r = reward_consistency_loss(r_pred, rew)
 
-            # REINFORCE term (optional) – use negative supervised loss diff
+            # ---------- REINFORCE term ----------
             reinforce_loss = torch.tensor(0.0, device=device)
             if cfg.lambda_reinforce > 0:
-                # log_probs: (B, T)  →  take the batch-mean so we have one per step
-                log_list = [log_probs[:, t].mean() for t in range(cfg.max_iters)]
-
-                # per-step supervised loss to create rewards (still placeholder)
-                step_losses = [loss_q.detach() for _ in range(cfg.max_iters)]
-                step_rewards = [step_losses[0]] + [
-                    step_losses[t] - step_losses[t - 1] for t in range(1, cfg.max_iters)
-                ]
-
-                reinforce_loss = (
-                    reinforce_term(log_list, step_rewards) * cfg.lambda_reinforce
-                )
+                # average step losses across batch → scalar per step
+                step_avg = [torch.stack(sl).mean() for sl in step_losses]
+                rewards = [step_avg[0]] + [step_avg[t]-step_avg[t-1] for t in range(1, cfg.max_iters)]
+                log_mean = log_probs.mean(dim=0)  # (T,)
+                reinforce_loss = reinforce_term(log_mean, rewards) * cfg.lambda_reinforce
 
             total = (cfg.lambda_q * loss_q + cfg.lambda_d * loss_cql +
                      cfg.lambda_t * loss_t + cfg.lambda_r * loss_r + reinforce_loss)
 
+            # ------------------------------------------------ optimise
             optim.zero_grad()
             total.backward()
-            torch.nn.utils.clip_grad_norm_(params, 1.0)
+            torch.nn.utils.clip_grad_norm_(params, cfg.grad_clip)
             optim.step()
 
-            # ==== logging ====
-
-            logger.log(global_step, total_loss=total, q_loss=loss_q, cql=loss_cql, trans_cons=loss_t, rew_cons=loss_r,)
-            global_step += 1
-            
-
-            # EMA update
+            # EMA
             with torch.no_grad():
                 for pt, p in zip(enc_t.parameters(), encoder.parameters()):
                     pt.data.mul_(1 - ema_tau).add_(p.data, alpha=ema_tau)
 
-            pbar.set_postfix({"loss": f"{total.item():.4f}"})
+            # log
+            logger.log(global_step, total_loss=total, q_loss=loss_q,
+                       cql=loss_cql, trans_cons=loss_t, rew_cons=loss_r)
+            global_step += 1
+            pbar.set_postfix(loss=f"{total.item():.4f}")
 
-        # checkpoint
-        ckpt_dir = Path("checkpoints"); ckpt_dir.mkdir(exist_ok=True)
-        torch.save({
+        # checkpoint each epoch
+        ckpt = {
             "encoder": encoder.state_dict(),
             "transition": transition.state_dict(),
             "reward": reward_net.state_dict(),
             "value": value_net.state_dict(),
-        }, ckpt_dir / f"dtsn_epoch{epoch+1}.pt")
-    logger.close()
+        }
+        Path("checkpoints").mkdir(exist_ok=True)
+        torch.save(ckpt, Path("checkpoints") / f"dtsn_epoch{epoch+1}.pt")
 
+    logger.close()
 
 
 if __name__ == "__main__":
