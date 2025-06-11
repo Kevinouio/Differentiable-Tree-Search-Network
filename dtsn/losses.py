@@ -62,12 +62,12 @@ def reinforce_term(log_probs: list[torch.Tensor], step_rewards: list[torch.Tenso
     log_probs : list of log π_θ(n_t | τ_t) for each expansion step
     step_rewards : list of *scalars* r_t = L_t − L_{t‑1} (tensors, grad‑bearing)
     """
+    # allow passing a single Tensor [T]
+    if isinstance(log_probs, torch.Tensor):
+        log_probs = list(log_probs.unbind(0))
     assert len(log_probs) == len(step_rewards)
-
     rewards = torch.stack(step_rewards)  # [T]
-    # returns_t = Σ_{i≥t} r_i  (vectorised via cumsum over flipped tensor)
-    returns = torch.flip(torch.cumsum(torch.flip(rewards, dims=[0]), dim=0), dims=[0])
-
-    log_probs = torch.stack(log_probs)  # [T]
-    # Negative for gradient‑descent (we *minimise* loss)
-    return -(log_probs * returns.detach()).mean()
+    returns = torch.flip(torch.cumsum(torch.flip(rewards, [0]), 0), [0])
+    # now this stack is safe
+    lp = torch.stack(log_probs)  # [T]
+    return -(lp * returns.detach()).mean()

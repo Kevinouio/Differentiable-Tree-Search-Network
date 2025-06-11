@@ -65,11 +65,14 @@ class DTSNSearch:
         for t in range(self.max_iters):
             # ------------ select node -------------
             path_vals = torch.stack([
-                node.reward.detach() + self.value(node.latent) for node in open_set
-            ])  # (K,)
+                (node.reward.detach() + self.value(node.latent)).view(())  # make 0-D
+                for node in open_set
+            ]).view(-1)                                     # (K,)
             probs = torch.softmax(path_vals / self.temperature, dim=0)
             m = torch.distributions.Categorical(probs)
             idx_t = m.sample()
+            idx   = int(idx_t)   # keep; will now be safe
+
             log_probs.append(m.log_prob(idx_t))
             node = open_set.pop(int(idx_t))
 
@@ -105,7 +108,15 @@ class DTSNSearch:
 
     def _root_q_vector(self, root: TreeNode, device) -> torch.Tensor:
         q_vec = torch.full((self.action_dim,), float('-inf'), device=device)
+        # for a, child in root.children.items():
+        #     r = child.reward
+        #     q_vec[a] = r + (self.value(child.latent) if child.is_leaf() else child._q_vec.max())
         for a, child in root.children.items():
             r = child.reward
-            q_vec[a] = r + (self.value(child.latent) if child.is_leaf() else child._q_vec.max())
+            # if no q-vector has been backed up yet, fall back to the value function
+            if child._q_vec is None:
+                q = self.value(child.latent)
+            else:
+                q = child._q_vec.max()
+            q_vec[a] = r + q
         return q_vec

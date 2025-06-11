@@ -4,17 +4,22 @@ import torch
 class TreeNode:
     """Lightweight container for a single node in the latent search tree."""
 
-    def __init__(self, latent: torch.Tensor, reward: torch.Tensor | None = None, depth: int = 0):
+    def __init__(self, latent: torch.Tensor,
+                 reward: torch.Tensor | None = None,
+                 depth: int = 0):
         # Latent state for this node (shape: [latent_dim])
         self.latent: torch.Tensor = latent
 
-        # Accumulated *tensor* reward along the path to this node so gradients can flow.
+        # Accumulated *tensor* reward along the path to this node
         if reward is None:
             reward = torch.zeros(1, device=latent.device, dtype=latent.dtype)
-        self.reward: torch.Tensor = reward  # shape: [1]
+        self.reward: torch.Tensor = reward        # shape: [1]
 
         self.depth: int = depth
         self.children: dict[int, "TreeNode"] = {}
+
+        # 👇 NEW: placeholder so backups never hit AttributeError
+        self._q_vec: torch.Tensor | None = None
 
     # Convenience helpers
     def is_leaf(self) -> bool:
