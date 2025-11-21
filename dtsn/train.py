@@ -60,7 +60,26 @@ def train(cfg_path: str | Path = "configs/config.yaml"):
     cfg.max_iters = int(cfg.max_iters)
     print("Using config:", cfg)
 
-    device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
+    # Device selection: honor config, but fall back gracefully and raise clear errors.
+    def _pick_device(requested: str) -> torch.device:
+        req = requested.lower()
+        if req == "auto":
+            if torch.cuda.is_available():
+                return torch.device("cuda")
+            if torch.backends.mps.is_available():
+                return torch.device("mps")
+            return torch.device("cpu")
+        if req == "cuda":
+            if not torch.cuda.is_available():
+                raise RuntimeError("cfg.device set to 'cuda' but torch.cuda.is_available() is False")
+            return torch.device("cuda")
+        if req == "mps":
+            if not torch.backends.mps.is_available():
+                raise RuntimeError("cfg.device set to 'mps' but torch.backends.mps.is_available() is False")
+            return torch.device("mps")
+        return torch.device("cpu")
+
+    device = _pick_device(getattr(cfg, "device", "auto"))
 
     # ---------- data ----------
     dataset = _load_dataset(cfg.dataset_path)
