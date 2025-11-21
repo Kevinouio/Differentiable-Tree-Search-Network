@@ -56,7 +56,7 @@ class DTSNSearch:
 
     # ------------------------------------------------------------------ single
     def _search_single(self, obs: torch.Tensor,
-                       step_hook: Optional[Callable[[torch.Tensor, int], None]]) -> Tuple[torch.Tensor, torch.Tensor]:
+                       step_hook: Optional[Callable[[torch.Tensor, int], None]] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         device = obs.device
         root = TreeNode(self.encoder(obs))
         open_set: List[TreeNode] = [root]
@@ -65,7 +65,7 @@ class DTSNSearch:
         for t in range(self.max_iters):
             # ------------ select node -------------
             path_vals = torch.stack([
-                (node.reward.detach() + self.value(node.latent)).view(())  # make 0-D
+                (node.reward + self.value(node.latent)).view(())  # make 0-D
                 for node in open_set
             ]).view(-1)                                     # (K,)
             probs = torch.softmax(path_vals / self.temperature, dim=0)
@@ -88,6 +88,8 @@ class DTSNSearch:
                 open_set.append(child)
 
             if step_hook is not None:
+                # Run a full backup on the partially expanded tree so L_t matches Eq. (6)
+                self._backup(root)
                 step_hook(self._root_q_vector(root, device), t)
 
         # ------------ backup ---------------------

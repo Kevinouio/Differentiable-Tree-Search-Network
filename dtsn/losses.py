@@ -54,20 +54,26 @@ def reward_consistency_loss(r_pred: torch.Tensor, r_true: torch.Tensor) -> torch
 # REINFORCE term with telescoping‑sum baseline for node‑selection policy
 # -----------------------------------------------------------------------------
 
-def reinforce_term(log_probs: list[torch.Tensor], step_rewards: list[torch.Tensor]) -> torch.Tensor:
-    """Variance‑reduced REINFORCE objective (Eq. 6).
+def reinforce_term(log_probs, step_rewards) -> torch.Tensor:
+    """Variance-reduced REINFORCE objective (Eq. 11).
 
     Args
     -----
-    log_probs : list of log π_θ(n_t | τ_t) for each expansion step
-    step_rewards : list of *scalars* r_t = L_t − L_{t‑1} (tensors, grad‑bearing)
+    log_probs : tensor/list of log π_θ(n_t | τ_t) for each expansion step.
+                Shape (T,) or (B, T).
+    step_rewards : per-step rewards r_t = L_t − L_{t‑1}. Accepts list, (T,) or (B, T).
     """
-    # allow passing a single Tensor [T]
-    if isinstance(log_probs, torch.Tensor):
-        log_probs = list(log_probs.unbind(0))
-    assert len(log_probs) == len(step_rewards)
-    rewards = torch.stack(step_rewards)  # [T]
-    returns = torch.flip(torch.cumsum(torch.flip(rewards, [0]), 0), [0])
-    # now this stack is safe
-    lp = torch.stack(log_probs)  # [T]
+    # coerce to tensors
+    rewards = torch.stack(step_rewards, dim=0) if isinstance(step_rewards, list) else step_rewards
+    lp = torch.stack(log_probs, dim=0) if isinstance(log_probs, list) else log_probs
+
+    if rewards.dim() == 1:
+        rewards = rewards.unsqueeze(0)  # (1, T)
+    if lp.dim() == 1:
+        lp = lp.unsqueeze(0)            # (1, T)
+
+    assert lp.shape == rewards.shape
+
+    # returns R_t = sum_{i=t..T} r_i, computed along the last axis
+    returns = torch.flip(torch.cumsum(torch.flip(rewards, dims=[-1]), dim=-1), dims=[-1])
     return -(lp * returns.detach()).mean()

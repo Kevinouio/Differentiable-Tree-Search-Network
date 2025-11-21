@@ -17,9 +17,15 @@ import pickle
 from argparse import ArgumentParser
 from pathlib import Path
 from typing import List, Tuple
+import sys
 
 import numpy as np
 import torch
+
+# Allow running as `python scripts/make_dataset.py` without installing the package.
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 # -----------------------------------------------------------------------------
 # Grid-World Environment

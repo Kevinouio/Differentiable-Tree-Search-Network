@@ -101,9 +101,6 @@ data/
 
 If you use this codebase or ideas from this implementation, please cite the original D-TSN paper:
 
-> **Differentiable Tree-Structured Models for Deep Reinforcement Learning**
-> Liang et al., ICLR 2023
-> [arXiv:2206.13556](https://arxiv.org/abs/2206.13556)
 
 ---
 

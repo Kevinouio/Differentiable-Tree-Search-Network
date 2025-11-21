@@ -1,10 +1,16 @@
 # scripts/eval_navigation.py
 import argparse
 from pathlib import Path
+import sys
 
 import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
+
+# Allow running as `python scripts/eval_navigation.py` without installing the package.
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from envs.gridworld import GridWorld
 from dtsn.model import Encoder, Transition, Reward, Value

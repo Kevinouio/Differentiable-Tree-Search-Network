@@ -9,11 +9,17 @@ from __future__ import annotations
 import pickle
 from pathlib import Path
 from types import SimpleNamespace
+import sys
 
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm.auto import tqdm
+
+# Allow running as `python dtsn/train.py` without installing the package.
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from dtsn.model import Encoder, Transition, Reward, Value
 from dtsn.search import DTSNSearch
@@ -97,9 +103,11 @@ def train(cfg_path: str | Path = "configs/config.yaml"):
             step_losses: list[list[torch.Tensor]] = [[] for _ in range(cfg.max_iters)]
 
             def hook(q_vec: torch.Tensor, b: int, t: int):
-                """Collect per‑step supervised loss for REINFORCE baseline."""
+                """Collect λ1 L_Q + λ2 L_D per expansion (for Eq. 11 telescope)."""
                 chosen = q_vec[act[b]]
-                step_losses[t].append(F.mse_loss(chosen, q_target[b], reduction='none'))
+                l_q = F.mse_loss(chosen, q_target[b], reduction='none')
+                l_d = torch.logsumexp(q_vec, dim=0) - chosen
+                step_losses[t].append(cfg.lambda_q * l_q + cfg.lambda_d * l_d)
 
             q_vecs, log_probs = search.search(obs, step_hook=hook)
             # q_vecs (B,A)  log_probs (B,T)
@@ -119,11 +127,12 @@ def train(cfg_path: str | Path = "configs/config.yaml"):
             # ---------- REINFORCE term ----------
             reinforce_loss = torch.tensor(0.0, device=device)
             if cfg.lambda_reinforce > 0:
-                # average step losses across batch → scalar per step
-                step_avg = [torch.stack(sl).mean() for sl in step_losses]
-                rewards = [step_avg[0]] + [step_avg[t]-step_avg[t-1] for t in range(1, cfg.max_iters)]
-                log_mean = log_probs.mean(dim=0)  # (T,)
-                reinforce_loss = reinforce_term(log_mean, rewards) * cfg.lambda_reinforce
+                # stack to (batch, T) so Rt = L_T − L_{t−1} per trajectory
+                step_loss_tensor = torch.stack([torch.stack(sl) for sl in step_losses], dim=1)
+                step_rewards = torch.zeros_like(step_loss_tensor)
+                step_rewards[:, 0] = step_loss_tensor[:, 0]
+                step_rewards[:, 1:] = step_loss_tensor[:, 1:] - step_loss_tensor[:, :-1]
+                reinforce_loss = reinforce_term(log_probs, step_rewards) * cfg.lambda_reinforce
 
             total = (cfg.lambda_q * loss_q + cfg.lambda_d * loss_cql +
                      cfg.lambda_t * loss_t + cfg.lambda_r * loss_r + reinforce_loss)
