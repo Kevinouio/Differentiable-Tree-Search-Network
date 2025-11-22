@@ -15,7 +15,7 @@ temperature: 1.0        # softmax τ for node selection
 learning_rate: 3e-4
 batch_size: 32
 epochs: 50
-device: cuda            # "cpu" or "cuda"
+device: cpu            # "cpu" or "cuda"
 
 # ---------- Loss Weights ----------
 lambda_q:          1.0   # supervised Q regression

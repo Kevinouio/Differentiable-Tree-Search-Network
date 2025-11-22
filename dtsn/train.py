@@ -52,7 +52,7 @@ def _load_dataset(pkl_path: str | Path) -> TensorDataset:
 # main
 # -----------------------------------------------------------------------------
 
-def train(cfg_path: str | Path = "configs/config.yaml"):
+def train(cfg_path: str | Path = "configs/config.yaml", resume: str | None = None):
     # ---------- config ----------
     cfg = _load_config(cfg_path)
     cfg.learning_rate = float(cfg.learning_rate)
@@ -81,9 +81,17 @@ def train(cfg_path: str | Path = "configs/config.yaml"):
 
     device = _pick_device(getattr(cfg, "device", "auto"))
 
+
     # ---------- data ----------
     dataset = _load_dataset(cfg.dataset_path)
-    loader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True, drop_last=True)
+    loader = DataLoader(
+        dataset,
+        batch_size=cfg.batch_size,
+        shuffle=True,
+        drop_last=True,
+        pin_memory=device.type == "cuda",
+        num_workers=2 if device.type in ("cuda", "mps") else 0,
+    )
     obs_dim = dataset.tensors[0].shape[-1]
     action_dim = cfg.action_dim
 
@@ -110,9 +118,25 @@ def train(cfg_path: str | Path = "configs/config.yaml"):
     # ---------- logging ----------
     logger = TBLogger(run_name=f"grid_bs{cfg.batch_size}_lr{cfg.learning_rate}")
     global_step = 0
+    start_epoch = 0
+
+    # ---------- optional resume ----------
+    if resume is not None:
+        ckpt = torch.load(resume, map_location=device)
+        encoder.load_state_dict(ckpt["encoder"])
+        transition.load_state_dict(ckpt["transition"])
+        reward_net.load_state_dict(ckpt["reward"])
+        value_net.load_state_dict(ckpt["value"])
+        if "encoder_target" in ckpt:
+            enc_t.load_state_dict(ckpt["encoder_target"])
+        if "optimizer" in ckpt:
+            optim.load_state_dict(ckpt["optimizer"])
+        start_epoch = int(ckpt.get("epoch", 0))
+        global_step = int(ckpt.get("global_step", 0))
+        print(f"Resumed from {resume} at epoch {start_epoch}, global_step {global_step}")
 
     # ------------------------------------------------------------------ epochs
-    for epoch in range(cfg.epochs):
+    for epoch in range(start_epoch, cfg.epochs):
         pbar = tqdm(loader, desc=f"epoch {epoch+1}/{cfg.epochs}")
         for obs, act, rew, next_obs, q_target in pbar:
             obs, act = obs.to(device), act.to(device)
@@ -128,7 +152,11 @@ def train(cfg_path: str | Path = "configs/config.yaml"):
                 l_d = torch.logsumexp(q_vec, dim=0) - chosen
                 step_losses[t].append(cfg.lambda_q * l_q + cfg.lambda_d * l_d)
 
-            q_vecs, log_probs = search.search(obs, step_hook=hook)
+            optim.zero_grad(set_to_none=True)
+
+            # reuse encoder outputs to avoid extra forward passes
+            h = encoder(obs)
+            q_vecs, log_probs = search.search(obs, step_hook=hook, root_latents=h)
             # q_vecs (B,A)  log_probs (B,T)
 
             # ------------------------------------------------ losses
@@ -138,9 +166,9 @@ def train(cfg_path: str | Path = "configs/config.yaml"):
 
             with torch.no_grad():
                 h_next_true = enc_t(next_obs)
-            h_pred = transition(encoder(obs), act)
+            h_pred = transition(h, act)
             loss_t = transition_consistency_loss(h_pred, h_next_true)
-            r_pred = reward_net(encoder(obs), act)
+            r_pred = reward_net(h, act)
             loss_r = reward_consistency_loss(r_pred, rew)
 
             # ---------- REINFORCE term ----------
@@ -156,8 +184,6 @@ def train(cfg_path: str | Path = "configs/config.yaml"):
             total = (cfg.lambda_q * loss_q + cfg.lambda_d * loss_cql +
                      cfg.lambda_t * loss_t + cfg.lambda_r * loss_r + reinforce_loss)
 
-            # ------------------------------------------------ optimise
-            optim.zero_grad()
             total.backward()
             torch.nn.utils.clip_grad_norm_(params, cfg.grad_clip)
             optim.step()
@@ -179,6 +205,10 @@ def train(cfg_path: str | Path = "configs/config.yaml"):
             "transition": transition.state_dict(),
             "reward": reward_net.state_dict(),
             "value": value_net.state_dict(),
+            "encoder_target": enc_t.state_dict(),
+            "optimizer": optim.state_dict(),
+            "epoch": epoch + 1,
+            "global_step": global_step,
         }
         Path("checkpoints").mkdir(exist_ok=True)
         torch.save(ckpt, Path("checkpoints") / f"dtsn_epoch{epoch+1}.pt")
@@ -187,4 +217,10 @@ def train(cfg_path: str | Path = "configs/config.yaml"):
 
 
 if __name__ == "__main__":
-    train()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default="configs/config.yaml")
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Path to checkpoint to resume (loads model + optimizer + EMA).")
+    args = parser.parse_args()
+    train(args.config, resume=args.resume)

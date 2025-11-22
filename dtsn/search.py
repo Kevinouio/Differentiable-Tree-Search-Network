@@ -27,7 +27,8 @@ class DTSNSearch:
 
     # ------------------------------------------------------------------ public
     def search(self, obs_batch: torch.Tensor,
-               step_hook: Optional[Callable[[torch.Tensor, int, int], None]] = None
+               step_hook: Optional[Callable[[torch.Tensor, int, int], None]] = None,
+               root_latents: Optional[torch.Tensor] = None
                ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Batch search.
 
@@ -35,6 +36,7 @@ class DTSNSearch:
         ----------
         obs_batch : (B, obs_dim) tensor
         step_hook : optional ``hook(q_vec, b, t)`` to collect intermediate losses.
+        root_latents : optional (B, latent_dim) tensor to skip re-encoding obs.
 
         Returns
         -------
@@ -42,23 +44,33 @@ class DTSNSearch:
         log_probs: (B, max_iters)
         """
         if step_hook is None:
-            q_vecs, logps = torch.vmap(
-                lambda o: self._search_single(o, None), randomness="different"
-            )(obs_batch)
+            if root_latents is None:
+                q_vecs, logps = torch.vmap(
+                    lambda o: self._search_single(o, None, None),
+                    randomness="different",
+                )(obs_batch)
+            else:
+                q_vecs, logps = torch.vmap(
+                    lambda o, h: self._search_single(o, None, h),
+                    randomness="different",
+                )(obs_batch, root_latents)
             return q_vecs, torch.stack(logps, dim=0)
 
         # slower path with hooks
         qs, lps = [], []
         for b, obs in enumerate(obs_batch):
-            q, lp = self._search_single(obs, lambda qv, t: step_hook(qv, b, t))
+            root_latent = None if root_latents is None else root_latents[b]
+            q, lp = self._search_single(obs, lambda qv, t: step_hook(qv, b, t), root_latent)
             qs.append(q); lps.append(lp)
         return torch.stack(qs), torch.stack(lps)
 
     # ------------------------------------------------------------------ single
     def _search_single(self, obs: torch.Tensor,
-                       step_hook: Optional[Callable[[torch.Tensor, int], None]] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+                       step_hook: Optional[Callable[[torch.Tensor, int], None]] = None,
+                       root_latent: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         device = obs.device
-        root = TreeNode(self.encoder(obs))
+        root_h = self.encoder(obs) if root_latent is None else root_latent
+        root = TreeNode(root_h)
         open_set: List[TreeNode] = [root]
         log_probs: List[torch.Tensor] = []
 
@@ -67,8 +79,12 @@ class DTSNSearch:
             path_vals = torch.stack([
                 (node.reward + self.value(node.latent)).view(())  # make 0-D
                 for node in open_set
-            ]).view(-1)                                     # (K,)
-            probs = torch.softmax(path_vals / self.temperature, dim=0)
+            ]).view(-1).float()                              # (K,)
+            # numerically stable softmax, enforce simplex in fp32
+            logits = (path_vals - path_vals.max()) / self.temperature
+            probs = torch.softmax(logits, dim=0)
+            probs = (probs / probs.sum()).clamp_min(1e-8)
+            probs = probs / probs.sum()
             m = torch.distributions.Categorical(probs)
             idx_t = m.sample()
             idx   = int(idx_t)   # keep; will now be safe
